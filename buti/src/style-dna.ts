@@ -53,7 +53,7 @@ export const STYLE_DNA: Record<string, StyleDNA> = {
       'solid block',
       'skin tint',
       'shadow halo',
-      'new brow geometry',
+      'stock or reference-face brow geometry',
       'harsh stencil outline',
       'stamp look',
     ],
@@ -73,7 +73,7 @@ export const STYLE_DNA: Record<string, StyleDNA> = {
       'powder fill',
       'skin tint',
       'shadow halo',
-      'new brow geometry',
+      'stock or reference-face brow geometry',
       'blocky brow box',
     ],
   },
@@ -88,10 +88,10 @@ export const STYLE_DNA: Record<string, StyleDNA> = {
     texture: 'velvety organic micro-pigment gradient, no heavy paint, no flat blocks',
     forbidden: [
       'hair strokes',
-      'pigment outside customer brow zone',
+      'pigment outside the geometry-guided target zone',
       'eyelid shadow',
       'skin retouching',
-      'new brow geometry',
+      'stock or reference-face brow geometry',
       'sharp sharpie outline',
     ],
   },
@@ -106,10 +106,10 @@ export const STYLE_DNA: Record<string, StyleDNA> = {
     texture: 'layered multidimensional hair-stroke and powder finish with organic skin sheen',
     forbidden: [
       'solid block',
-      'pigment outside customer brow zone',
+      'pigment outside the geometry-guided target zone',
       'under-brow shadow',
       'eyelid makeup',
-      'new brow geometry',
+      'stock or reference-face brow geometry',
       'sticker appearance',
     ],
   },
@@ -295,7 +295,7 @@ export function styleDnaText(
     if (preferences?.browShape === 'defined') {
       additions.push('structured clean border within natural margin, neat elegant arch');
     } else if (preferences?.browShape === 'natural') {
-      additions.push('preserve natural irregular contour, follow exact native geometry, organic asymmetry');
+      additions.push('natural softly refined contour inside the geometry-guided target, proportional arch and tail, organic asymmetry');
     }
 
     if (preferences?.density === 'dense') {

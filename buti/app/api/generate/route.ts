@@ -9,6 +9,7 @@ import type { AttemptLog } from '@/providers/types';
 import { recordEvent } from '@/stats';
 import { readSiteImage } from '@/site-images';
 import { compressGeneratedImage } from '@/image-compress';
+import { runImageAgent, type ImageAgentResult } from '@/agent/image-agent';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -103,6 +104,11 @@ interface GenerateSuccess {
   demo: boolean;
   attempts: AttemptLog[];
   ms: number;
+  processing?: {
+    agentApplied: boolean;
+    reason: string;
+    qa?: string;
+  };
 }
 
 interface GenerateFailure {
@@ -210,11 +216,24 @@ export async function POST(request: Request): Promise<NextResponse<GenerateSucce
 
   /* --------------------------- زنجیرهٔ پروایدرها --------------------------- */
   try {
-    const result = await generateWithFallback({
-      prompt,
-      image,
-      referenceImage: referenceImage ?? undefined,
-    });
+    // Brows use the modular ROI/registration agent. Other services retain the
+    // existing provider path unchanged. The agent itself is fail-open.
+    const result = knownStyle.service === 'eyebrows'
+      ? await runImageAgent(
+          {
+            service: knownStyle.service,
+            styleKey: knownStyle.key,
+            prompt,
+            image,
+            referenceImage: referenceImage ?? undefined,
+          },
+          generateWithFallback,
+        )
+      : await generateWithFallback({
+          prompt,
+          image,
+          referenceImage: referenceImage ?? undefined,
+        });
 
     trackPreview(knownStyle?.key ?? style);
 
@@ -232,6 +251,7 @@ export async function POST(request: Request): Promise<NextResponse<GenerateSucce
       `[AI-GENERATE] SUCCESS | provider=${result.provider.id} | duration=${Date.now() - requestStartedAt}ms`,
     );
 
+    const agentResult = 'agent' in result ? result as ImageAgentResult : null;
     return NextResponse.json({
       ok: true,
       provider: result.provider.id,
@@ -240,6 +260,15 @@ export async function POST(request: Request): Promise<NextResponse<GenerateSucce
       demo: false,
       attempts: result.attempts,
       ms: result.ms,
+      ...(agentResult
+        ? {
+            processing: {
+              agentApplied: agentResult.agent.applied,
+              reason: agentResult.agent.reason,
+              qa: agentResult.agent.qa,
+            },
+          }
+        : {}),
     });
   } catch (error) {
     const attempts = (error as { attempts?: AttemptLog[] })?.attempts ?? [];

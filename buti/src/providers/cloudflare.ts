@@ -72,11 +72,11 @@ function guidance(): string {
 }
 
 type SharpChain = {
-  metadata: () => Promise<{ width?: number; height?: number }>;
+  metadata: () => Promise<{ width?: number; height?: number; orientation?: number }>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rotate: () => any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   resize: (width: number, height: number, opts: Record<string, unknown>) => any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extract: (region: { left: number; top: number; width: number; height: number }) => any;
   jpeg: (opts: Record<string, unknown>) => { toBuffer: () => Promise<Buffer> };
 };
 
@@ -97,6 +97,8 @@ interface FittedInput {
   bytes: Buffer;
   mime: string;
   extension: string;
+  width?: number;
+  height?: number;
 }
 
 /**
@@ -118,31 +120,33 @@ export async function fitInputImage(
     const sharp = loadSharp();
     if (!sharp) return original;
     const meta = await sharp(bytes).metadata();
-    const width = meta.width ?? 0;
-    const height = meta.height ?? 0;
-    if (!width || !height) return original;
+    const rawWidth = meta.width ?? 0;
+    const rawHeight = meta.height ?? 0;
+    if (!rawWidth || !rawHeight) return original;
+    const swapsAxes = (meta.orientation ?? 1) >= 5 && (meta.orientation ?? 1) <= 8;
+    const orientedWidth = swapsAxes ? rawHeight : rawWidth;
+    const orientedHeight = swapsAxes ? rawWidth : rawHeight;
 
     if (mode === 'macro') {
-      const side = Math.min(width, height);
       const out: Buffer = await sharp(bytes)
-        .extract({
-          left: Math.floor((width - side) / 2),
-          top: Math.floor((height - side) / 2),
-          width: side,
-          height: side,
-        })
-        .resize(MAX_INPUT_SIDE, MAX_INPUT_SIDE, { fit: 'fill' })
+        .rotate()
+        .resize(MAX_INPUT_SIDE, MAX_INPUT_SIDE, { fit: 'cover', position: 'centre' })
         .jpeg({ quality: 92 })
         .toBuffer();
-      return { bytes: out, mime: 'image/jpeg', extension: 'jpg' };
+      return { bytes: out, mime: 'image/jpeg', extension: 'jpg', width: MAX_INPUT_SIDE, height: MAX_INPUT_SIDE };
     }
 
-    if (Math.max(width, height) <= MAX_INPUT_SIDE) return original;
+    const scale = Math.min(1, MAX_INPUT_SIDE / Math.max(orientedWidth, orientedHeight));
+    const width = Math.max(1, Math.round(orientedWidth * scale));
+    const height = Math.max(1, Math.round(orientedHeight * scale));
+    // Always materialize an auto-oriented JPEG. This normalizes JPEG EXIF and
+    // decodes PNG/WebP through the same provider-safe path.
     const out: Buffer = await sharp(bytes)
-      .resize(MAX_INPUT_SIDE, MAX_INPUT_SIDE, { fit: 'inside', withoutEnlargement: true })
+      .rotate()
+      .resize(width, height, { fit: 'inside', withoutEnlargement: true })
       .jpeg({ quality: 92 })
       .toBuffer();
-    return { bytes: out, mime: 'image/jpeg', extension: 'jpg' };
+    return { bytes: out, mime: 'image/jpeg', extension: 'jpg', width, height };
   } catch (error) {
     console.error(
       `[AI-PROVIDER] cloudflare input-fit skipped: ${
@@ -156,12 +160,16 @@ export async function fitInputImage(
 /**
  * Keep the provider output in the same aspect ratio as the uploaded photo.
  */
-function outputSize(bytes: Uint8Array): { width: number; height: number } {
+export function outputSize(bytes: Uint8Array, knownSize?: { width?: number; height?: number }): { width: number; height: number } {
   const view = bytes;
-  let width = 1024;
-  let height = 1024;
+  let width = knownSize?.width ?? 1024;
+  let height = knownSize?.height ?? 1024;
 
+  if (knownSize?.width && knownSize?.height) {
+    width = knownSize.width;
+    height = knownSize.height;
   // PNG
+  } else
   if (
     view.length >= 24 &&
     view[0] === 0x89 && view[1] === 0x50 && view[2] === 0x4e &&
@@ -194,6 +202,23 @@ function outputSize(bytes: Uint8Array): { width: number; height: number } {
         break;
       }
       offset += segmentLength;
+    }
+  } else if (
+    view.length >= 30 &&
+    String.fromCharCode(...view.slice(0, 4)) === 'RIFF' &&
+    String.fromCharCode(...view.slice(8, 12)) === 'WEBP'
+  ) {
+    const chunk = String.fromCharCode(...view.slice(12, 16));
+    if (chunk === 'VP8X') {
+      width = 1 + view[24] + (view[25] << 8) + (view[26] << 16);
+      height = 1 + view[27] + (view[28] << 8) + (view[29] << 16);
+    } else if (chunk === 'VP8 ' && view.length >= 30) {
+      width = (view[26] | (view[27] << 8)) & 0x3fff;
+      height = (view[28] | (view[29] << 8)) & 0x3fff;
+    } else if (chunk === 'VP8L' && view.length >= 25) {
+      const bits = view[21] | (view[22] << 8) | (view[23] << 16) | (view[24] << 24);
+      width = (bits & 0x3fff) + 1;
+      height = ((bits >>> 14) & 0x3fff) + 1;
     }
   }
 
@@ -231,19 +256,20 @@ export const cloudflareProvider: Provider = {
       const { signal, done } = timeoutSignal(cloudflareTimeoutMs(input));
 
       try {
-        const size = outputSize(new Uint8Array(input.image.bytes));
         const form = new FormData();
 
         // یادآوری کوتاه نقش تصاویر (جزئیات کامل در خود پرامپت هست — تکرار نمی‌کنیم)
         const enhancedPrompt = `${input.prompt} ROLE: IMAGE 0 is the customer-face authority; IMAGE 1 (if any) is a technique swatch only — never copy its face or skin.`;
 
-        // ورودی‌ها در سقف رسمی ۵۱۲ پیکسل آماده می‌شوند (رقیق‌سازی کمتر + آپلود سریع‌تر)
+        // Decode WebP/PNG/JPEG, apply EXIF orientation and respect the model's
+        // 512px input ceiling before output dimensions are calculated.
         const fittedPhoto = await fitInputImage(
           Buffer.from(input.image.bytes),
           input.image.mime,
           input.image.extension,
           'photo',
         );
+        const size = outputSize(new Uint8Array(fittedPhoto.bytes), fittedPhoto);
 
         form.append('prompt', enhancedPrompt);
         form.append('guidance', guidance());

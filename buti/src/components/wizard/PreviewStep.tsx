@@ -59,6 +59,9 @@ export const PreviewStep: React.FC<PreviewStepProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [clientCompositing, setClientCompositing] = useState(false);
   const [finalCompositedImage, setFinalCompositedImage] = useState<string>('');
+  const [visionStatus, setVisionStatus] = useState<
+    'idle' | 'processing' | 'applied' | 'fallback-no-face' | 'fallback-error'
+  >('idle');
 
   const isGold = planTier === 'gold';
   const watermarkEnabled = planTier === 'bronze';
@@ -77,6 +80,7 @@ export const PreviewStep: React.FC<PreviewStepProps> = ({
   React.useEffect(() => {
     if (!resultImage || !imagePreviewUrl || isDemo) {
       setFinalCompositedImage(resultImage);
+      setVisionStatus('idle');
       return;
     }
 
@@ -85,6 +89,8 @@ export const PreviewStep: React.FC<PreviewStepProps> = ({
     async function runClientVision() {
       try {
         setClientCompositing(true);
+        setVisionStatus('processing');
+        setFinalCompositedImage('');
 
         // ۱. بارگذاری تصویر اصلی در یک المنت موقت جهت استخراج لندمارک‌ها
         const baseImg = await loadImage(imagePreviewUrl);
@@ -102,24 +108,32 @@ export const PreviewStep: React.FC<PreviewStepProps> = ({
             features,
             (selectedService as ServiceTarget) || 'eyebrows',
             {
-              featherRadius: selectedService === 'eyeliner' ? 3 : 8,
+              // Feather defaults are calculated from the detected feature size.
               watermarkEnabled,
             }
           );
 
           if (isMounted) {
             setFinalCompositedImage(composited);
+            setVisionStatus('applied');
             if (onClientCompositeFinish) {
               onClientCompositeFinish(composited);
             }
           }
         } else {
-          // در صورت عدم شناسایی لندمارک، همان تصویر خام AI استفاده می‌شود
-          if (isMounted) setFinalCompositedImage(resultImage);
+          // Fail-open is explicit in the UI: this is provider output, not a
+          // landmark-registered composite.
+          if (isMounted) {
+            setFinalCompositedImage(resultImage);
+            setVisionStatus('fallback-no-face');
+          }
         }
       } catch (err) {
         console.warn('Client-side vision processing notice:', err);
-        if (isMounted) setFinalCompositedImage(resultImage);
+        if (isMounted) {
+          setFinalCompositedImage(resultImage);
+          setVisionStatus('fallback-error');
+        }
       } finally {
         if (isMounted) setClientCompositing(false);
       }
@@ -238,10 +252,11 @@ export const PreviewStep: React.FC<PreviewStepProps> = ({
         {effectiveResultImage && imagePreviewUrl ? (
           <div className="relative w-full h-full">
             {/* برچسب‌های شیشه‌ای شناور ریسپانسیو */}
-            <div className="absolute top-2.5 right-2.5 z-20 px-2.5 py-1 rounded-full bg-neutral-950/70 backdrop-blur-md border border-white/20 text-[9px] sm:text-[10px] text-neutral-200 font-medium shadow-lg pointer-events-none">
+            {/* react-compare-slider renders itemOne on the left and itemTwo on the right. */}
+            <div className="absolute top-2.5 left-2.5 z-20 px-2.5 py-1 rounded-full bg-neutral-950/70 backdrop-blur-md border border-white/20 text-[9px] sm:text-[10px] text-neutral-200 font-medium shadow-lg pointer-events-none">
               قبل | طبیعی
             </div>
-            <div className="absolute top-2.5 left-2.5 z-20 px-2.5 py-1 rounded-full bg-amber-500/30 backdrop-blur-md border border-amber-400/50 text-[9px] sm:text-[10px] text-amber-200 font-bold shadow-lg pointer-events-none flex items-center gap-1">
+            <div className="absolute top-2.5 right-2.5 z-20 px-2.5 py-1 rounded-full bg-amber-500/30 backdrop-blur-md border border-amber-400/50 text-[9px] sm:text-[10px] text-amber-200 font-bold shadow-lg pointer-events-none flex items-center gap-1">
               <span>{isDemo ? 'بعد | نمایشی 🎭' : 'بعد | پیش‌نمایش'}</span>
               <span className="text-xs">✨</span>
             </div>
@@ -249,6 +264,18 @@ export const PreviewStep: React.FC<PreviewStepProps> = ({
               <div className="absolute bottom-0 inset-x-0 z-20 px-3 py-2 bg-neutral-950/85 backdrop-blur-md border-t border-amber-400/40 text-center pointer-events-none">
                 <p className="text-[10px] sm:text-[11px] text-amber-300 font-bold leading-relaxed">
                   🎭 حالت نمایشی — موتور هوش مصنوعی وصل نیست؛ موقعیت طرح تقریبی است و خروجی واقعی محسوب نمی‌شود
+                </p>
+              </div>
+            )}
+            {!isDemo && visionStatus === 'applied' && (
+              <div className="absolute top-11 right-2.5 z-20 px-2 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/50 text-[9px] text-emerald-200 pointer-events-none">
+                تطبیق لندمارک و کامپوزیت انجام شد
+              </div>
+            )}
+            {!isDemo && (visionStatus === 'fallback-no-face' || visionStatus === 'fallback-error') && (
+              <div className="absolute bottom-0 inset-x-0 z-20 px-3 py-2 bg-red-950/90 border-t border-red-500/60 text-center pointer-events-none">
+                <p className="text-[10px] sm:text-[11px] text-red-100 font-bold leading-relaxed">
+                  ⚠️ تطبیق چهره انجام نشد؛ تصویر سمت «بعد» خروجی خام مدل است و کامپوزیت نهایی نیست.
                 </p>
               </div>
             )}
